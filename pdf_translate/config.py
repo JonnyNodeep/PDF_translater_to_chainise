@@ -58,6 +58,9 @@ class PdfTranslateConfig:
     openai_api_key: str | None
     translate_model: str
     font_path: str | None
+    min_fontsize: float
+    font_step: float
+    text_unit: str
     min_text_chars_per_page: int
     max_chars_per_request: int
     ocr_langs: str
@@ -75,6 +78,11 @@ def load_config(project_root: Path | None = None) -> PdfTranslateConfig:
     openai_api_key = _env_get("OPENAI_API_KEY", dotenv)
     translate_model = _env_get("PDF_TRANSLATE_MODEL", dotenv) or "gpt-4.1-mini"
     font_path = _env_get("PDF_FONT_PATH", dotenv)
+    min_fontsize = _env_get_float("PDF_MIN_FONTSIZE", dotenv, default=3.0)
+    font_step = _env_get_float("PDF_FONT_STEP", dotenv, default=0.5)
+    text_unit = (_env_get("PDF_TEXT_UNIT", dotenv) or "span").strip().lower()
+    if text_unit not in {"line", "span"}:
+        text_unit = "span"
     min_text_chars_per_page = _env_get_int("PDF_MIN_TEXT_CHARS_PER_PAGE", dotenv, default=40)
     max_chars_per_request = _env_get_int("PDF_MAX_CHARS_PER_REQUEST", dotenv, default=6000)
     ocr_langs = _env_get("PDF_OCR_LANGS", dotenv) or "en,ru"
@@ -89,6 +97,9 @@ def load_config(project_root: Path | None = None) -> PdfTranslateConfig:
         openai_api_key=openai_api_key,
         translate_model=translate_model,
         font_path=font_path,
+        min_fontsize=min_fontsize,
+        font_step=font_step,
+        text_unit=text_unit,
         min_text_chars_per_page=min_text_chars_per_page,
         max_chars_per_request=max_chars_per_request,
         ocr_langs=ocr_langs,

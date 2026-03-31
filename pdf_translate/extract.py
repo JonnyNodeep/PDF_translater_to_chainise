@@ -12,6 +12,13 @@ class TextSpanItem:
     text: str
 
 
+@dataclass(frozen=True)
+class TextLineItem:
+    page_index: int
+    rect: fitz.Rect
+    text: str
+
+
 def _bbox_area(rect: fitz.Rect) -> float:
     return max(0.0, (rect.x1 - rect.x0)) * max(0.0, (rect.y1 - rect.y0))
 
@@ -49,6 +56,57 @@ def extract_text_spans_by_page(
         page_char_counts[page_index] = char_count
 
     return spans_by_page, page_char_counts
+
+
+def extract_text_lines_by_page(
+    doc: fitz.Document,
+    *,
+    min_bbox_area: float = 4.0,
+) -> tuple[dict[int, list[TextLineItem]], dict[int, int]]:
+    lines_by_page: dict[int, list[TextLineItem]] = {}
+    page_char_counts: dict[int, int] = {}
+
+    for page_index in range(doc.page_count):
+        page = doc.load_page(page_index)
+        d = page.get_text("dict")
+        items: list[TextLineItem] = []
+        char_count = 0
+
+        for block in d.get("blocks", []):
+            for line in block.get("lines", []):
+                spans = line.get("spans", []) or []
+                parts: list[str] = []
+                rect_union: fitz.Rect | None = None
+                line_bbox = line.get("bbox")
+                if line_bbox and isinstance(line_bbox, (list, tuple)) and len(line_bbox) == 4:
+                    try:
+                        rect_union = fitz.Rect(line_bbox)
+                    except Exception:  # noqa: BLE001
+                        rect_union = None
+                for span in spans:
+                    t = (span.get("text") or "").strip()
+                    if not t:
+                        continue
+                    bbox = span.get("bbox")
+                    if not bbox or len(bbox) != 4:
+                        continue
+                    r = fitz.Rect(bbox)
+                    if _bbox_area(r) < min_bbox_area:
+                        continue
+                    rect_union = r if rect_union is None else (rect_union | r)
+                    parts.append(t)
+                if not parts or rect_union is None:
+                    continue
+                text = " ".join(parts).strip()
+                if not text:
+                    continue
+                items.append(TextLineItem(page_index=page_index, rect=rect_union, text=text))
+                char_count += len(text)
+
+        lines_by_page[page_index] = items
+        page_char_counts[page_index] = char_count
+
+    return lines_by_page, page_char_counts
 
 
 PageMode = str  # "text" | "ocr"

@@ -76,15 +76,18 @@ class Translator:
         missing: list[tuple[int, str]] = []
         for i, k in enumerate(keys):
             cached = self.cache.get(k)
-            if cached is not None:
+            if cached is not None and not (normalized[i] and cached.strip() == ""):
                 out[i] = cached
             else:
                 missing.append((i, normalized[i]))
 
         if missing:
             translated_missing = self._translate_missing([t for _, t in missing])
-            for (i, _src), zh in zip(missing, translated_missing, strict=False):
+            for (i, src), zh in zip(missing, translated_missing, strict=False):
                 out[i] = zh
+                # Do not cache empty translations for non-empty source (prevents permanent blanks).
+                if src and not (zh or "").strip():
+                    continue
                 self.cache.set(keys[i], zh)
             self.cache.save()
 
@@ -114,7 +117,20 @@ class Translator:
                 results.append("")
                 continue
             try:
-                results.extend(self._call_openai_list(batch))
+                translated = self._call_openai_list(batch)
+                # If the model returns blanks for non-blank inputs, retry line-by-line for those.
+                if len(translated) == len(batch):
+                    for src, zh in zip(batch, translated, strict=False):
+                        if src and not (zh or "").strip():
+                            try:
+                                retry = self._call_openai_list([src])
+                                results.append(retry[0] if retry else "")
+                            except Exception:  # noqa: BLE001
+                                results.append("")
+                        else:
+                            results.append(zh)
+                else:
+                    results.extend(translated)
             except Exception:  # noqa: BLE001
                 # Fallback: translate line-by-line for this batch.
                 for t in batch:

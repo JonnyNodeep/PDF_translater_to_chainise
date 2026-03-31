@@ -9,7 +9,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 from pdf_translate.config import PdfTranslateConfig, load_config
-from pdf_translate.extract import extract_text_spans_by_page, decide_page_modes
+from pdf_translate.extract import decide_page_modes, extract_text_lines_by_page, extract_text_spans_by_page
 from pdf_translate.ocr import ocr_items_for_page
 from pdf_translate.render import RenderOptions, overlay_and_insert, redact_and_insert
 from pdf_translate.translate import Translator
@@ -77,7 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     doc = fitz.open(str(in_path))
     log.info("Pages: %d", doc.page_count)
 
-    spans_by_page, page_char_counts = extract_text_spans_by_page(doc, min_bbox_area=cfg.min_span_bbox_area)
+    if cfg.text_unit == "span":
+        spans_by_page, page_char_counts = extract_text_spans_by_page(doc, min_bbox_area=cfg.min_span_bbox_area)
+        text_items_by_page = spans_by_page
+    else:
+        lines_by_page, page_char_counts = extract_text_lines_by_page(doc, min_bbox_area=cfg.min_span_bbox_area)
+        text_items_by_page = lines_by_page
     modes = decide_page_modes(
         doc_page_count=doc.page_count,
         page_char_counts=page_char_counts,
@@ -85,8 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         force_ocr=args.force_ocr,
     )
 
-    total_spans = sum(len(v) for v in spans_by_page.values())
-    log.info("Extracted text spans: %d", total_spans)
+    total_items = sum(len(v) for v in text_items_by_page.values())
+    log.info("Extracted text items (%s): %d", cfg.text_unit, total_items)
 
     translator = Translator(
         api_key=cfg.openai_api_key,
@@ -95,23 +100,40 @@ def main(argv: list[str] | None = None) -> int:
         max_chars_per_request=cfg.max_chars_per_request,
     )
 
-    render_opts = RenderOptions(font_path=cfg.font_path)
+    render_opts = RenderOptions(
+        font_path=cfg.font_path,
+        min_fontsize=cfg.min_fontsize,
+        step=cfg.font_step,
+    )
 
     for page_index in range(doc.page_count):
         mode = modes[page_index]
         log.info("Page %d/%d mode=%s", page_index + 1, doc.page_count, mode)
         page = doc.load_page(page_index)
+        # Note: do not rely on page.insert_font alone — apply_redactions() can drop embedded fonts;
+        # insert_textbox must pass fontfile each time when using a custom CJK font.
+
         try:
             if mode == "text":
-                items = spans_by_page.get(page_index, [])
+                items = text_items_by_page.get(page_index, [])
                 if not items:
                     continue
                 src_texts = [it.text for it in items]
                 translations = translator.translate_texts(src_texts)
+                render_fail = 0
+                fail_samples: list[tuple[str, str]] = []
                 for it, zh in zip(items, translations, strict=False):
                     if not zh.strip():
                         continue
-                    redact_and_insert(page, it.rect, zh, render_opts)
+                    ok = redact_and_insert(page, it.rect, zh, render_opts)
+                    if not ok:
+                        render_fail += 1
+                        if len(fail_samples) < 5:
+                            fail_samples.append((it.text, zh))
+                if render_fail:
+                    log.warning("Page %d: render failures (text)=%d", page_index + 1, render_fail)
+                    for src, zh in fail_samples:
+                        log.warning("  sample_fail src=%r zh=%r", src[:80], zh[:80])
             else:
                 ocr_items = ocr_items_for_page(
                     page=page,
@@ -123,10 +145,15 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 src_texts = [it.text for it in ocr_items]
                 translations = translator.translate_texts(src_texts)
+                render_fail = 0
                 for it, zh in zip(ocr_items, translations, strict=False):
                     if not zh.strip():
                         continue
-                    overlay_and_insert(page, it.rect, zh, render_opts)
+                    ok = overlay_and_insert(page, it.rect, zh, render_opts)
+                    if not ok:
+                        render_fail += 1
+                if render_fail:
+                    log.warning("Page %d: render failures (ocr)=%d", page_index + 1, render_fail)
         except Exception as e:  # noqa: BLE001
             log.exception("Failed processing page %d: %s", page_index + 1, e)
             # Best-effort: continue other pages.
@@ -137,8 +164,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc.save(str(out_path))
-    log.info("Saved: %s", out_path)
+    tmp_out = out_path.with_suffix(out_path.suffix + ".tmp")
+    if tmp_out.exists():
+        try:
+            tmp_out.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    doc.save(str(tmp_out))
+    try:
+        tmp_out.replace(out_path)
+        log.info("Saved: %s", out_path)
+    except Exception as e:  # noqa: BLE001
+        # Common on Windows: output is open in a viewer -> permission denied.
+        alt_out = out_path.with_name(out_path.stem + "_new" + out_path.suffix)
+        tmp_out.replace(alt_out)
+        log.warning("Could not overwrite output (%s). Saved to: %s (%s)", out_path, alt_out, e)
     return 0
 
 
