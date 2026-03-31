@@ -1,0 +1,23 @@
+pdf_translate/cache/
+*.tmp
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Secrets
+.env
+
+# Outputs / large artifacts
+Results/
+*.pdf
+
+# Local inputs
+pdf_files/
+
+# Packaging artifacts
+*.egg-info/
+dist/
+build/
+

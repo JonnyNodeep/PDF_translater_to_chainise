@@ -1,0 +1,20 @@
+[project]
+name = "pdf-translater"
+version = "0.1.0"
+description = "PDF Translate RU→ZH (isolated module)"
+requires-python = ">=3.10"
+dependencies = [
+  "pymupdf",
+  "pillow",
+  "openai",
+  "paddleocr",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pdf_translate*"]
+exclude = ["pdf_files*"]
+
