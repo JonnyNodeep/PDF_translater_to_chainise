@@ -9,9 +9,10 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 from pdf_translate.config import PdfTranslateConfig, load_config
+from pdf_translate.background import pick_text_rgb, render_page_image, rgb255_to_float, sample_background_rgb
 from pdf_translate.extract import decide_page_modes, extract_text_lines_by_page, extract_text_spans_by_page
 from pdf_translate.ocr import ocr_items_for_page
-from pdf_translate.render import RenderOptions, overlay_and_insert, redact_and_insert
+from pdf_translate.render import RenderOptions, overlay_with_bg_and_insert
 from pdf_translate.translate import Translator
 
 
@@ -115,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             if mode == "text":
+                page_img = render_page_image(page, dpi=cfg.render_dpi)
                 items = text_items_by_page.get(page_index, [])
                 if not items:
                     continue
@@ -125,7 +127,17 @@ def main(argv: list[str] | None = None) -> int:
                 for it, zh in zip(items, translations, strict=False):
                     if not zh.strip():
                         continue
-                    ok = redact_and_insert(page, it.rect, zh, render_opts)
+                    bg = sample_background_rgb(page_img, it.rect)
+                    fg = pick_text_rgb(bg)
+                    ok = overlay_with_bg_and_insert(
+                        page,
+                        it.rect,
+                        zh,
+                        render_opts,
+                        bg_fill=rgb255_to_float(bg),
+                        text_color=rgb255_to_float(fg),
+                        start_fontsize=getattr(it, "source_fontsize", None),
+                    )
                     if not ok:
                         render_fail += 1
                         if len(fail_samples) < 5:
@@ -143,13 +155,24 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 if not ocr_items:
                     continue
+                page_img = render_page_image(page, dpi=cfg.render_dpi)
                 src_texts = [it.text for it in ocr_items]
                 translations = translator.translate_texts(src_texts)
                 render_fail = 0
                 for it, zh in zip(ocr_items, translations, strict=False):
                     if not zh.strip():
                         continue
-                    ok = overlay_and_insert(page, it.rect, zh, render_opts)
+                    bg = sample_background_rgb(page_img, it.rect)
+                    fg = pick_text_rgb(bg)
+                    ok = overlay_with_bg_and_insert(
+                        page,
+                        it.rect,
+                        zh,
+                        render_opts,
+                        bg_fill=rgb255_to_float(bg),
+                        text_color=rgb255_to_float(fg),
+                        start_fontsize=None,
+                    )
                     if not ok:
                         render_fail += 1
                 if render_fail:

@@ -80,14 +80,14 @@ def _wrap_text(text: str, *, font: fitz.Font, fontsize: float, max_width: float)
     return lines
 
 
-def _fit_text_to_rect(text: str, rect: fitz.Rect, opts: RenderOptions) -> tuple[float, str] | None:
+def _fit_text_to_rect(text: str, rect: fitz.Rect, opts: RenderOptions, *, start_fontsize: float | None = None) -> tuple[float, str] | None:
     font = _get_font(opts)
     max_width = max(0.0, rect.width)
     max_height = max(0.0, rect.height)
     if max_width <= 0 or max_height <= 0:
         return None
 
-    fontsize = float(opts.start_fontsize)
+    fontsize = float(start_fontsize if start_fontsize is not None else opts.start_fontsize)
     while fontsize >= float(opts.min_fontsize) - 1e-9:
         lines = _wrap_text(text, font=font, fontsize=fontsize, max_width=max_width)
         line_h = fontsize * float(opts.line_height_mult)
@@ -123,6 +123,7 @@ def _insert_text_fallback_point(
     rect: fitz.Rect,
     text: str,
     opts: RenderOptions,
+    color: tuple[float, float, float] = (0, 0, 0),
 ) -> bool:
     """Last resort: single-line text at top-left of rect, tiny font."""
     s = (text or "").strip()
@@ -138,7 +139,7 @@ def _insert_text_fallback_point(
             fontsize=fontsize,
             fontname=opts.font_name,
             fontfile=ff,
-            color=(0, 0, 0),
+            color=color,
         )
         return True
     except Exception:  # noqa: BLE001
@@ -151,6 +152,7 @@ def _find_fontsize_with_scratch_page(
     rect: fitz.Rect,
     text: str,
     opts: RenderOptions,
+    start_fontsize: float | None = None,
 ) -> float | None:
     # Use MuPDF's own layouting on a scratch page to see whether text can fit.
     # This avoids "redact then fail => blank hole".
@@ -162,7 +164,7 @@ def _find_fontsize_with_scratch_page(
         except Exception:  # noqa: BLE001
             pass
     ff = opts.font_path if opts.use_fontfile_in_insert else None
-    fontsize = float(opts.start_fontsize)
+    fontsize = float(start_fontsize if start_fontsize is not None else opts.start_fontsize)
     while fontsize >= float(opts.min_fontsize) - 1e-9:
         rc = scratch_page.insert_textbox(
             rect,
@@ -273,4 +275,49 @@ def overlay_and_insert(page: fitz.Page, rect: fitz.Rect, text: str, opts: Render
     fontsize, wrapped = fit
     page.draw_rect(rect, color=None, fill=(1, 1, 1))
     return _insert_textbox(page, rect, wrapped, fontsize, opts)
+
+
+def overlay_with_bg_and_insert(
+    page: fitz.Page,
+    rect: fitz.Rect,
+    text: str,
+    opts: RenderOptions,
+    *,
+    bg_fill: tuple[float, float, float],
+    text_color: tuple[float, float, float],
+    start_fontsize: float | None = None,
+) -> bool:
+    # For quality mode: keep background by filling with sampled color.
+    fit = _fit_text_to_rect(text, rect, opts, start_fontsize=start_fontsize)
+    if fit is None:
+        rect2 = _expanded_rect(page, rect)
+        fit = _fit_text_to_rect(text, rect2, opts, start_fontsize=start_fontsize)
+        if fit is None:
+            rect3 = _expanded_rect_wide(page, rect)
+            fit = _fit_text_to_rect(text, rect3, opts, start_fontsize=start_fontsize)
+            if fit is None:
+                fontsize3 = _find_fontsize_with_scratch_page(
+                    page=page,
+                    rect=rect3,
+                    text=text,
+                    opts=opts,
+                    start_fontsize=start_fontsize,
+                )
+                if fontsize3 is None:
+                    page.draw_rect(rect, color=None, fill=bg_fill)
+                    return _insert_text_fallback_point(page, rect, text, opts, color=text_color)
+                page.draw_rect(rect, color=None, fill=bg_fill)
+                return _insert_textbox(page, rect3, text, fontsize3, opts, color=text_color)
+            fontsize, wrapped = fit
+            page.draw_rect(rect, color=None, fill=bg_fill)
+            ok = _insert_textbox(page, rect3, wrapped, fontsize, opts, color=text_color)
+            return ok if ok else _insert_text_fallback_point(page, rect, text, opts, color=text_color)
+        fontsize, wrapped = fit
+        page.draw_rect(rect, color=None, fill=bg_fill)
+        ok = _insert_textbox(page, rect2, wrapped, fontsize, opts, color=text_color)
+        return ok if ok else _insert_text_fallback_point(page, rect, text, opts, color=text_color)
+    fontsize, wrapped = fit
+    page.draw_rect(rect, color=None, fill=bg_fill)
+    ok = _insert_textbox(page, rect, wrapped, fontsize, opts, color=text_color)
+    return ok if ok else _insert_text_fallback_point(page, rect, text, opts, color=text_color)
 

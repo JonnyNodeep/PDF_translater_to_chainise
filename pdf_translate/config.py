@@ -65,6 +65,7 @@ class PdfTranslateConfig:
     max_chars_per_request: int
     ocr_langs: str
     ocr_dpi: int
+    render_dpi: int
     ocr_min_score: float
     min_span_bbox_area: float
     cache_path: Path
@@ -87,6 +88,7 @@ def load_config(project_root: Path | None = None) -> PdfTranslateConfig:
     max_chars_per_request = _env_get_int("PDF_MAX_CHARS_PER_REQUEST", dotenv, default=6000)
     ocr_langs = _env_get("PDF_OCR_LANGS", dotenv) or "en,ru"
     ocr_dpi = _env_get_int("PDF_OCR_DPI", dotenv, default=200)
+    render_dpi = _env_get_int("PDF_RENDER_DPI", dotenv, default=180)
     ocr_min_score = _env_get_float("PDF_OCR_MIN_SCORE", dotenv, default=0.5)
     min_span_bbox_area = _env_get_float("PDF_MIN_SPAN_BBOX_AREA", dotenv, default=4.0)
 
@@ -104,6 +106,7 @@ def load_config(project_root: Path | None = None) -> PdfTranslateConfig:
         max_chars_per_request=max_chars_per_request,
         ocr_langs=ocr_langs,
         ocr_dpi=ocr_dpi,
+        render_dpi=render_dpi,
         ocr_min_score=ocr_min_score,
         min_span_bbox_area=min_span_bbox_area,
         cache_path=cache_path,

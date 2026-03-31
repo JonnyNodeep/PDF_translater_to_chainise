@@ -10,6 +10,7 @@ class TextSpanItem:
     page_index: int
     rect: fitz.Rect
     text: str
+    source_fontsize: float
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class TextLineItem:
     page_index: int
     rect: fitz.Rect
     text: str
+    source_fontsize: float
 
 
 def _bbox_area(rect: fitz.Rect) -> float:
@@ -49,7 +51,12 @@ def extract_text_spans_by_page(
                     rect = fitz.Rect(bbox)
                     if _bbox_area(rect) < min_bbox_area:
                         continue
-                    items.append(TextSpanItem(page_index=page_index, rect=rect, text=text))
+                    size = span.get("size")
+                    try:
+                        fontsize = float(size) if size is not None else 12.0
+                    except Exception:  # noqa: BLE001
+                        fontsize = 12.0
+                    items.append(TextSpanItem(page_index=page_index, rect=rect, text=text, source_fontsize=fontsize))
                     char_count += len(text)
 
         spans_by_page[page_index] = items
@@ -100,7 +107,17 @@ def extract_text_lines_by_page(
                 text = " ".join(parts).strip()
                 if not text:
                     continue
-                items.append(TextLineItem(page_index=page_index, rect=rect_union, text=text))
+                # Prefer the line's first span fontsize if available, else default.
+                first_size = None
+                for span in spans:
+                    if (span.get("text") or "").strip():
+                        first_size = span.get("size")
+                        break
+                try:
+                    fontsize = float(first_size) if first_size is not None else 12.0
+                except Exception:  # noqa: BLE001
+                    fontsize = 12.0
+                items.append(TextLineItem(page_index=page_index, rect=rect_union, text=text, source_fontsize=fontsize))
                 char_count += len(text)
 
         lines_by_page[page_index] = items
