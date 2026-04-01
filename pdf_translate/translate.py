@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +20,7 @@ class TranslationConfig:
     api_key: str
     model: str
     max_chars_per_request: int = 6000
+    base_url: str | None = None
 
 
 class TranslationCache:
@@ -62,9 +64,15 @@ class Translator:
         api_key: str,
         model: str,
         cache_path: Path,
+        base_url: str | None = None,
         max_chars_per_request: int = 6000,
     ) -> None:
-        self.cfg = TranslationConfig(api_key=api_key, model=model, max_chars_per_request=max_chars_per_request)
+        self.cfg = TranslationConfig(
+            api_key=api_key,
+            model=model,
+            max_chars_per_request=max_chars_per_request,
+            base_url=base_url,
+        )
         self.cache = TranslationCache(cache_path)
 
     def translate_texts(self, texts: list[str]) -> list[str]:
@@ -117,13 +125,13 @@ class Translator:
                 results.append("")
                 continue
             try:
-                translated = self._call_openai_list(batch)
+                translated = self._call_chat_list(batch)
                 # If the model returns blanks for non-blank inputs, retry line-by-line for those.
                 if len(translated) == len(batch):
                     for src, zh in zip(batch, translated, strict=False):
                         if src and not (zh or "").strip():
                             try:
-                                retry = self._call_openai_list([src])
+                                retry = self._call_chat_list([src])
                                 results.append(retry[0] if retry else "")
                             except Exception:  # noqa: BLE001
                                 results.append("")
@@ -135,7 +143,7 @@ class Translator:
                 # Fallback: translate line-by-line for this batch.
                 for t in batch:
                     try:
-                        results.extend(self._call_openai_list([t]))
+                        results.extend(self._call_chat_list([t]))
                     except Exception:  # noqa: BLE001
                         results.append("")
         # Ensure same length as input
@@ -144,33 +152,62 @@ class Translator:
             results = (results + [""] * len(texts))[: len(texts)]
         return results
 
-    def _call_openai_list(self, texts: list[str]) -> list[str]:
+    def _call_chat_list(self, texts: list[str]) -> list[str]:
         from openai import OpenAI  # type: ignore
-        from pydantic import BaseModel
 
-        class _Out(BaseModel):
-            translations: list[str]
+        kwargs: dict = {"api_key": self.cfg.api_key}
+        if self.cfg.base_url:
+            kwargs["base_url"] = self.cfg.base_url
+        client = OpenAI(**kwargs)
 
-        client = OpenAI(api_key=self.cfg.api_key)
-        instructions = (
+        system = (
             "Translate Russian text snippets to Simplified Chinese.\n"
-            "Return results preserving the same order and length.\n"
-            "Do not add any extra commentary."
+            "Respond with a JSON object only: {\"translations\": [\"...\", ...]}.\n"
+            "The translations array must have exactly the same length and order as the input texts."
         )
-        payload = {"texts": texts}
+        user_content = json.dumps({"texts": texts}, ensure_ascii=False)
 
-        # Use structured parsing to avoid JSON formatting issues.
-        resp = client.responses.parse(
-            model=self.cfg.model,
-            instructions=instructions,
-            input=json.dumps(payload, ensure_ascii=False),
-            text={"format": _Out},
-        )
-        parsed = resp.output_parsed
-        if parsed is None:
-            raise ValueError("No parsed output from model")
-        data = parsed.translations
-        if len(data) != len(texts):
-            raise ValueError("Translation response length mismatch")
-        return data
+        def _parse_translations(content: str) -> list[str]:
+            obj = _parse_json_object(content)
+            data = obj.get("translations")
+            if not isinstance(data, list):
+                raise ValueError("Missing translations array")
+            if len(data) != len(texts):
+                raise ValueError("Translation response length mismatch")
+            return [str(x) for x in data]
+
+        try:
+            resp = client.chat.completions.create(
+                model=self.cfg.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ],
+                response_format={"type": "json_object"},
+            )
+        except Exception:
+            resp = client.chat.completions.create(
+                model=self.cfg.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ],
+            )
+
+        raw = (resp.choices[0].message.content or "").strip()
+        if not raw:
+            raise ValueError("Empty model response")
+        return _parse_translations(raw)
+
+
+def _parse_json_object(text: str) -> dict:
+    s = text.strip()
+    if s.startswith("```"):
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s)
+        if m:
+            s = m.group(1).strip()
+    data = json.loads(s)
+    if not isinstance(data, dict):
+        raise ValueError("Expected JSON object")
+    return data
 

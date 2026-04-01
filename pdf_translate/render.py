@@ -10,9 +10,10 @@ class RenderOptions:
     font_path: str | None
     font_name: str = "cjk"
     start_fontsize: float = 12.0
+    max_fontsize: float | None = None
     min_fontsize: float = 2.0
     step: float = 0.25
-    line_height_mult: float = 1.05
+    line_height_mult: float = 1.0
     # Always pass fontfile for custom CJK fonts; redactions can drop embedded font resources.
     use_fontfile_in_insert: bool = True
 
@@ -80,20 +81,66 @@ def _wrap_text(text: str, *, font: fitz.Font, fontsize: float, max_width: float)
     return lines
 
 
-def _fit_text_to_rect(text: str, rect: fitz.Rect, opts: RenderOptions, *, start_fontsize: float | None = None) -> tuple[float, str] | None:
+def _fit_text_to_rect(
+    text: str,
+    rect: fitz.Rect,
+    opts: RenderOptions,
+    *,
+    start_fontsize: float | None = None,
+) -> tuple[float, str] | None:
     font = _get_font(opts)
     max_width = max(0.0, rect.width)
     max_height = max(0.0, rect.height)
     if max_width <= 0 or max_height <= 0:
         return None
 
-    fontsize = float(start_fontsize if start_fontsize is not None else opts.start_fontsize)
-    while fontsize >= float(opts.min_fontsize) - 1e-9:
-        lines = _wrap_text(text, font=font, fontsize=fontsize, max_width=max_width)
-        line_h = fontsize * float(opts.line_height_mult)
+    def _fits(fs: float) -> tuple[float, str] | None:
+        lines = _wrap_text(text, font=font, fontsize=fs, max_width=max_width)
+        line_h = fs * float(opts.line_height_mult)
         if (len(lines) * line_h) <= max_height + 1e-6:
-            return fontsize, "\n".join(lines)
-        fontsize -= float(opts.step)
+            return fs, "\n".join(lines)
+        return None
+
+    min_fs = float(opts.min_fontsize)
+    step = float(opts.step)
+
+    # Cap rules:
+    # - If start_fontsize is provided (text-layer), never exceed it.
+    # - Optionally apply a global max cap (useful for OCR).
+    cap = float(start_fontsize) if start_fontsize is not None else None
+    if opts.max_fontsize is not None:
+        cap = float(opts.max_fontsize) if cap is None else min(cap, float(opts.max_fontsize))
+
+    candidate = float(start_fontsize if start_fontsize is not None else opts.start_fontsize)
+    if cap is not None:
+        candidate = min(candidate, cap)
+
+    # 1) If candidate already fits, try to maximize within cap.
+    fit = _fits(candidate)
+    if fit is not None:
+        if cap is None:
+            # If no explicit cap was provided, avoid runaway growth by keeping candidate.
+            return fit
+        fs = candidate
+        best = fit
+        while True:
+            next_fs = fs + step
+            if next_fs > cap + 1e-9:
+                break
+            next_fit = _fits(next_fs)
+            if next_fit is None:
+                break
+            best = next_fit
+            fs = next_fs
+        return best
+
+    # 2) Otherwise, shrink until it fits (as before).
+    fs = candidate - step
+    while fs >= min_fs - 1e-9:
+        fit2 = _fits(fs)
+        if fit2 is not None:
+            return fit2
+        fs -= step
     return None
 
 
@@ -209,69 +256,26 @@ def redact_and_insert(page: fitz.Page, rect: fitz.Rect, text: str, opts: RenderO
         ok = _insert_textbox(page, rect, wrapped, fontsize, opts)
         return ok if ok else _insert_text_fallback_point(page, rect, text, opts)
 
-    # Try again with an expanded rect (but redact only original rect).
-    rect2 = _expanded_rect(page, rect)
-    fit2 = _fit_text_to_rect(text, rect2, opts)
-    if fit2 is not None:
-        fontsize, wrapped = fit2
-        page.add_redact_annot(rect, fill=(1, 1, 1))
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-        ok = _insert_textbox(page, rect2, wrapped, fontsize, opts)
-        return ok if ok else _insert_text_fallback_point(page, rect, text, opts)
-
-    # Last resort: use a wide box to preserve content (may wrap more but avoids missing translations).
-    rect3 = _expanded_rect_wide(page, rect)
-    fit3 = _fit_text_to_rect(text, rect3, opts)
-    if fit3 is not None:
-        fontsize, wrapped = fit3
-        page.add_redact_annot(rect, fill=(1, 1, 1))
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-        ok = _insert_textbox(page, rect3, wrapped, fontsize, opts)
-        return ok if ok else _insert_text_fallback_point(page, rect, text, opts)
-    fontsize3 = _find_fontsize_with_scratch_page(page=page, rect=rect3, text=text, opts=opts)
-    if fontsize3 is not None:
-        page.add_redact_annot(rect, fill=(1, 1, 1))
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-        # Let MuPDF wrap text inside the box.
-        ok = _insert_textbox(page, rect3, text, fontsize3, opts)
-        if ok:
-            return True
-        return _insert_text_fallback_point(page, rect, text, opts)
-
-    # Fallback: try MuPDF's textbox fitting on a scratch page. If it fits there,
-    # we render via overlay (safe) to guarantee visibility.
+    # No-overlap policy: do not expand rect. If it doesn't fit, keep content best-effort.
     fontsize = _find_fontsize_with_scratch_page(page=page, rect=rect, text=text, opts=opts)
     if fontsize is None:
         page.draw_rect(rect, color=None, fill=(1, 1, 1))
         return _insert_text_fallback_point(page, rect, text, opts)
     page.draw_rect(rect, color=None, fill=(1, 1, 1))
     ok = _insert_textbox(page, rect, text, fontsize, opts)
-    if ok:
-        return True
-    return _insert_text_fallback_point(page, rect, text, opts)
+    return ok if ok else _insert_text_fallback_point(page, rect, text, opts)
 
 
 def overlay_and_insert(page: fitz.Page, rect: fitz.Rect, text: str, opts: RenderOptions) -> bool:
     # Never draw overlay if translation won't fit.
     fit = _fit_text_to_rect(text, rect, opts)
     if fit is None:
-        rect2 = _expanded_rect(page, rect)
-        fit = _fit_text_to_rect(text, rect2, opts)
-        if fit is None:
-            rect3 = _expanded_rect_wide(page, rect)
-            fit = _fit_text_to_rect(text, rect3, opts)
-            if fit is None:
-                fontsize3 = _find_fontsize_with_scratch_page(page=page, rect=rect3, text=text, opts=opts)
-                if fontsize3 is None:
-                    return False
-                page.draw_rect(rect, color=None, fill=(1, 1, 1))
-                return _insert_textbox(page, rect3, text, fontsize3, opts)
-            fontsize, wrapped = fit
-            page.draw_rect(rect, color=None, fill=(1, 1, 1))
-            return _insert_textbox(page, rect3, wrapped, fontsize, opts)
-        fontsize, wrapped = fit
+        # No-overlap policy: do not expand rect.
+        fontsize = _find_fontsize_with_scratch_page(page=page, rect=rect, text=text, opts=opts)
+        if fontsize is None:
+            return False
         page.draw_rect(rect, color=None, fill=(1, 1, 1))
-        return _insert_textbox(page, rect2, wrapped, fontsize, opts)
+        return _insert_textbox(page, rect, text, fontsize, opts)
     fontsize, wrapped = fit
     page.draw_rect(rect, color=None, fill=(1, 1, 1))
     return _insert_textbox(page, rect, wrapped, fontsize, opts)
@@ -290,31 +294,18 @@ def overlay_with_bg_and_insert(
     # For quality mode: keep background by filling with sampled color.
     fit = _fit_text_to_rect(text, rect, opts, start_fontsize=start_fontsize)
     if fit is None:
-        rect2 = _expanded_rect(page, rect)
-        fit = _fit_text_to_rect(text, rect2, opts, start_fontsize=start_fontsize)
-        if fit is None:
-            rect3 = _expanded_rect_wide(page, rect)
-            fit = _fit_text_to_rect(text, rect3, opts, start_fontsize=start_fontsize)
-            if fit is None:
-                fontsize3 = _find_fontsize_with_scratch_page(
-                    page=page,
-                    rect=rect3,
-                    text=text,
-                    opts=opts,
-                    start_fontsize=start_fontsize,
-                )
-                if fontsize3 is None:
-                    page.draw_rect(rect, color=None, fill=bg_fill)
-                    return _insert_text_fallback_point(page, rect, text, opts, color=text_color)
-                page.draw_rect(rect, color=None, fill=bg_fill)
-                return _insert_textbox(page, rect3, text, fontsize3, opts, color=text_color)
-            fontsize, wrapped = fit
-            page.draw_rect(rect, color=None, fill=bg_fill)
-            ok = _insert_textbox(page, rect3, wrapped, fontsize, opts, color=text_color)
-            return ok if ok else _insert_text_fallback_point(page, rect, text, opts, color=text_color)
-        fontsize, wrapped = fit
+        # No-overlap policy: do not expand rect. Keep best-effort visibility.
+        fontsize2 = _find_fontsize_with_scratch_page(
+            page=page,
+            rect=rect,
+            text=text,
+            opts=opts,
+            start_fontsize=start_fontsize,
+        )
         page.draw_rect(rect, color=None, fill=bg_fill)
-        ok = _insert_textbox(page, rect2, wrapped, fontsize, opts, color=text_color)
+        if fontsize2 is None:
+            return _insert_text_fallback_point(page, rect, text, opts, color=text_color)
+        ok = _insert_textbox(page, rect, text, fontsize2, opts, color=text_color)
         return ok if ok else _insert_text_fallback_point(page, rect, text, opts, color=text_color)
     fontsize, wrapped = fit
     page.draw_rect(rect, color=None, fill=bg_fill)

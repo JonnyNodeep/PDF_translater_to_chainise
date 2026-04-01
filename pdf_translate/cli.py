@@ -64,8 +64,8 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", e)
         return 2
 
-    if not cfg.openai_api_key:
-        log.error("Missing OPENAI_API_KEY in environment / .env")
+    if not cfg.translate_api_key:
+        log.error("Missing DEEPSEEK_API_KEY or OPENAI_API_KEY in environment / .env")
         return 2
 
     if cfg.font_path is None:
@@ -95,16 +95,20 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Extracted text items (%s): %d", cfg.text_unit, total_items)
 
     translator = Translator(
-        api_key=cfg.openai_api_key,
+        api_key=cfg.translate_api_key,
         model=cfg.translate_model,
+        base_url=cfg.translate_base_url,
         cache_path=cfg.cache_path,
         max_chars_per_request=cfg.max_chars_per_request,
     )
 
     render_opts = RenderOptions(
         font_path=cfg.font_path,
+        start_fontsize=cfg.start_fontsize,
+        max_fontsize=cfg.max_fontsize,
         min_fontsize=cfg.min_fontsize,
         step=cfg.font_step,
+        line_height_mult=cfg.line_height_mult,
     )
 
     for page_index in range(doc.page_count):
